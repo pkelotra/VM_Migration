@@ -5,7 +5,7 @@ import java.util.Scanner;
 
 /**
  * Main class to run the Post-Copy Live Migration simulation with user interaction.
- * Now accepts VM size in MB instead of pages.
+ * It accepts VM size in MB instead of pages.
  */
 public class Main {
     
@@ -32,11 +32,14 @@ public class Main {
             
             // Convert MB to pages (4KB per page = 4096 bytes)
             // Use long to avoid integer overflow, then cast to int
-            long vmSizePagesLong = ((long)vmSizeMB * 1024 * 1024) / 4096;
+            long vmSizePagesLong = ((long)vmSizeMB * 1024 * 1024) / 4096; // This I have done because when I was initially testing with large VM sizes like 2048 MB, the multiplication would exceed the int limit.
             int vmSizePages = (int)vmSizePagesLong;
             
             // Get free page ratio from user  
             double freePageRatio = getFreePageRatio(scanner, args);
+            
+            // Get link speed from user
+            double linkSpeedMbps = getLinkSpeed(scanner, args);
             
             System.out.println("\n" + repeat("=", 50));
             System.out.println("    SIMULATION CONFIGURATION");
@@ -44,6 +47,7 @@ public class Main {
             System.out.println("VM Size: " + vmSizeMB + " MB (" + vmSizePages + " pages)");
             System.out.println("Page Size: 4 KB (Standard OS page size)");
             System.out.println("Free Page Ratio: " + String.format("%.1f", freePageRatio * 100) + "%");
+            System.out.println("Link Speed: " + linkSpeedMbps + " Mbps");
             System.out.println("Expected DSB Savings: ~" + (int)(vmSizePages * freePageRatio) + " pages");
             System.out.println();
             
@@ -53,7 +57,7 @@ public class Main {
             
             // Start the simulation
             long simulationStart = System.currentTimeMillis();
-            PostCopyMigration migration = new PostCopyMigration(vmSizePages, freePageRatio);
+            PostCopyMigration migration = new PostCopyMigration(vmSizePages, freePageRatio, linkSpeedMbps);
             migration.start();
             long simulationEnd = System.currentTimeMillis();
             
@@ -86,23 +90,23 @@ public class Main {
         }
         
         // Interactive input
-        System.out.print("Enter VM size in MB (default: 256): ");
+        System.out.print("Enter VM size in MB (default: 2048): ");
         String input = scanner.nextLine().trim();
         
         if (input.isEmpty()) {
-            return 256; // default 256 MB
+            return 2048; // default 2048 MB
         }
         
         try {
             int vmSizeMB = Integer.parseInt(input);
             if (vmSizeMB <= 0) {
-                System.out.println("VM size must be positive. Using default: 256 MB");
-                return 256;
+                System.out.println("VM size must be positive. Using default: 2048 MB");
+                return 2048;
             }
             return vmSizeMB;
         } catch (NumberFormatException e) {
-            System.out.println("Invalid input. Using default: 256 MB");
-            return 256;
+            System.out.println("Invalid input. Using default: 2048 MB");
+            return 2048;
         }
     }
     
@@ -137,6 +141,40 @@ public class Main {
         } catch (NumberFormatException e) {
             System.out.println("Invalid input. Using default: 0.20");
             return 0.20;
+        }
+    }
+    
+    private static double getLinkSpeed(Scanner scanner, String[] args) {
+        // Check if link speed is provided as command line argument
+        if (args.length > 2) {
+            try {
+                double linkSpeed = Double.parseDouble(args[2]);
+                if (linkSpeed > 0) {
+                    return linkSpeed;
+                }
+            } catch (NumberFormatException e) {
+                // Fall through to interactive input
+            }
+        }
+        
+        // Interactive input
+        System.out.print("Enter link speed in Mbps (default: 1000): ");
+        String input = scanner.nextLine().trim();
+        
+        if (input.isEmpty()) {
+            return 1000.0; // default 1000 Mbps
+        }
+        
+        try {
+            double linkSpeed = Double.parseDouble(input);
+            if (linkSpeed <= 0) {
+                System.out.println("Link speed must be positive. Using default: 100 Mbps");
+                return 100.0;
+            }
+            return linkSpeed;
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid input. Using default: 100 Mbps");
+            return 100.0;
         }
     }
 }

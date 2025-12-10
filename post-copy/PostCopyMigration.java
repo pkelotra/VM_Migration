@@ -14,6 +14,10 @@ class PostCopyMigration {
     public static final int PAGE_SIZE_KB = 4; // Standard 4KB page size
     public static final int PAGE_SIZE_BYTES = PAGE_SIZE_KB * 1024; // 4096 bytes
     
+    // Network configuration
+    private final double linkSpeedMbps; // Link speed in Mbps
+    private final long pageTransferTimeMs; // Calculated transfer time per page in milliseconds
+    
     // Memory structures - using int arrays for memory representation
     private final int[] sourceMemory;     // Source VM memory (0=free, 1=used, 2=transferred)
     private final int[] targetMemory;     // Target VM memory (0=not_present, 1=present)
@@ -37,10 +41,23 @@ class PostCopyMigration {
     private long totalPagesTransferred = 0;
     private long pageFaults = 0;
     private long memoryAccesses = 0;
+    
+    // Thread completion flags
+    private volatile boolean migrationComplete = false;
+    private volatile boolean vmWorkloadComplete = false;
+    private volatile boolean demandPagingComplete = false;
 
     // Simulation Setup
-    public PostCopyMigration(int totalPages, double freePageRatio) {
+    public PostCopyMigration(int totalPages, double freePageRatio, double linkSpeedMbps) {
         this.TOTAL_PAGES = totalPages;
+        this.linkSpeedMbps = linkSpeedMbps;
+        
+        // Calculate page transfer time based on link speed
+        // Formula: (Page size in bits) / (Link speed in bps) * 1000 (to convert to ms)
+        double pageSizeBits = PAGE_SIZE_BYTES * 8.0; // Convert bytes to bits
+        double linkSpeedBps = linkSpeedMbps * 1_000_000.0; // Convert Mbps to bps
+        this.pageTransferTimeMs = Math.max(1, (long)(pageSizeBits / linkSpeedBps * 1000));
+        
         // Calculate NON_PAGEABLE_PAGES as 0.5% of total pages, minimum 5, maximum 50
         this.NON_PAGEABLE_PAGES = Math.max(5, Math.min(50, (int)(totalPages * 0.005)));
         
@@ -99,6 +116,8 @@ class PostCopyMigration {
         System.out.println("  - Page Size: " + PAGE_SIZE_KB + " KB (" + PAGE_SIZE_BYTES + " bytes)");
         System.out.println("  - Total VM Memory: " + String.format("%.1f", vmSizeMB) + " MB");
         System.out.println("  - Non-pageable pages: " + NON_PAGEABLE_PAGES + " (critical system pages)");
+        System.out.println("  - Link Speed: " + linkSpeedMbps + " Mbps");
+        System.out.println("  - Page Transfer Time: " + pageTransferTimeMs + " ms per page");
         System.out.println();
     }
 
@@ -137,7 +156,7 @@ class PostCopyMigration {
         for (int i = 0; i < NON_PAGEABLE_PAGES; i++) {
             System.out.print(".");
             if (i % 10 == 9) System.out.println();
-            Thread.sleep(10); // Simulate transfer time
+            Thread.sleep(pageTransferTimeMs); 
             
             // Mark page as transferred in both source and target
             sourceMemory[i] = 2;  // 2 = transferred
@@ -171,32 +190,38 @@ class PostCopyMigration {
         vmExecutionThread.setName("VMExecution");
         vmExecutionThread.start();
         
-        // Run simulation for a limited time
-        Thread.sleep(10000); // 10 seconds simulation
+        // Wait for VM workload to complete naturally
+        while (!vmWorkloadComplete && !Thread.currentThread().isInterrupted()) {
+            Thread.sleep(100);
+        }
+        
+        // Give some time for final page transfers to complete
+        Thread.sleep(500);
         
         // Stop simulation
+        migrationComplete = true;
         demandPagingThread.interrupt();
         vmExecutionThread.interrupt();
         
-        demandPagingThread.join(1000);
-        vmExecutionThread.join(1000);
+        demandPagingThread.join(2000);
+        vmExecutionThread.join(2000);
         
         long resumeTime = System.currentTimeMillis() - resumeStartTime;
         System.out.println();
-        System.out.println("✅ Post-Copy Migration Resume Phase completed in " + resumeTime + " ms");
+        System.out.println("Post-Copy Migration Resume Phase completed in " + resumeTime + " ms");
     }
 
     private void demandPagingService() {
         System.out.println("Demand Paging Service (Source): Waiting for page fault requests...");
         
-        while (!Thread.currentThread().isInterrupted()) {
+        while (!Thread.currentThread().isInterrupted() && !migrationComplete) {
             try {
                 Integer pageId = faultQueue.poll(1, TimeUnit.SECONDS);
                 if (pageId != null) {
                     // Check if page exists and is not already transferred
                     if (pageId < TOTAL_PAGES && sourceMemory[pageId] != 2) {
-                        // Simulate page transfer
-                        Thread.sleep(50); // Transfer latency
+                        // Simulate page transfer with realistic timing
+                        Thread.sleep(pageTransferTimeMs);
                         
                         // Mark as transferred in source and present in target
                         sourceMemory[pageId] = 2;  // 2 = transferred
@@ -214,6 +239,7 @@ class PostCopyMigration {
             }
         }
         
+        demandPagingComplete = true;
         System.out.println("Demand Paging Service completed: " + (totalPagesTransferred - NON_PAGEABLE_PAGES) + " pages transferred on demand");
     }
 
@@ -222,8 +248,10 @@ class PostCopyMigration {
         
         Random random = new Random();
         int accessCount = 0;
+        // Scale accesses with VM size, but keep reasonable bounds
+        int maxAccesses = Math.max(20, Math.min(100, TOTAL_PAGES / 5000));
         
-        while (!Thread.currentThread().isInterrupted() && accessCount < 40) {
+        while (!Thread.currentThread().isInterrupted() && accessCount < maxAccesses) {
             try {
                 // Simulate VM accessing a random page
                 int pageId = random.nextInt(TOTAL_PAGES);
@@ -247,12 +275,15 @@ class PostCopyMigration {
                     }
                 }
                 
-                Thread.sleep(100); // Simulate application work
+                Thread.sleep(50);
                 
             } catch (InterruptedException e) {
                 break;
             }
         }
+        
+        vmWorkloadComplete = true;
+        System.out.println("VM workload completed after " + accessCount + " page faults / " + memoryAccesses + " total accesses");
     }
 
     private void printResults() {
@@ -270,7 +301,8 @@ class PostCopyMigration {
         double vmSizeMB = (TOTAL_PAGES * PAGE_SIZE_KB) / 1024.0;
         double transferredMB = (totalPagesTransferred * PAGE_SIZE_KB) / 1024.0;
         double savedMB = ((TOTAL_PAGES - totalPagesTransferred) * PAGE_SIZE_KB) / 1024.0;
-        double transferEfficiency = (double) totalPagesTransferred / TOTAL_PAGES * 100;
+        double transferPercentage = (double) totalPagesTransferred / TOTAL_PAGES * 100;
+        double bandwidthSavings = (double) (TOTAL_PAGES - totalPagesTransferred) / TOTAL_PAGES * 100;
         double faultRate = memoryAccesses > 0 ? (double) pageFaults / memoryAccesses * 100 : 0;
         
         System.out.println("DEMAND PAGING POST-COPY MIGRATION METRICS:");
@@ -288,7 +320,9 @@ class PostCopyMigration {
         System.out.println("   - Total Pages Transferred: " + totalPagesTransferred + " pages (" + (int)(transferredMB * 1024) + " KB)");
         System.out.println("   - Total Data Transferred: " + String.format("%.2f", transferredMB) + " MB");
         System.out.println("   - Pages NOT Transferred: " + (TOTAL_PAGES - totalPagesTransferred) + " pages (" + String.format("%.2f", savedMB) + " MB saved!)");
-        System.out.println("   - Transfer Efficiency: " + String.format("%.1f", transferEfficiency) + "%");
+        System.out.println("   - Pages Transferred: " + String.format("%.3f", transferPercentage) + "% of VM");
+        System.out.println("   - Bandwidth Savings: " + String.format("%.3f", bandwidthSavings) + "% saved");
+        System.out.println("   - Post-Copy Efficiency: " + (bandwidthSavings > 90 ? "EXCELLENT" : bandwidthSavings > 80 ? "GOOD" : "FAIR"));
         System.out.println("   - Page Faults: " + pageFaults);
         System.out.println("   - Total Memory Accesses: " + memoryAccesses);
         System.out.println("   - Fault Rate: " + String.format("%.2f", faultRate) + "%");
